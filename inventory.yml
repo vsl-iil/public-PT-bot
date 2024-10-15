@@ -3,31 +3,31 @@ all:
     ansible1:
       ansible_user: ansible1
       ansible_ssh_pass: Qq123456
-      ansible_host: 192.168.187.159
+      ansible_host: 192.168.187.160
 
     ansible2: 
       ansible_user: ansible2
       ansible_ssh_pass: Qq123456
-      ansible_host: 192.168.187.160
+      ansible_host: 192.168.187.161
 
     ansible3: 
       ansible_user: ansible3
       ansible_ssh_pass: Qq123456
-      ansible_host: 192.168.187.161
+      ansible_host: 192.168.187.162
 
   vars:
     TOKEN: 
-    RM_HOST: 192.168.187.159
+    RM_HOST: 192.168.187.160
     RM_PORT: 22
     RM_USER: ansible1
     RM_PASSWORD: Qq123456
     DB_USER: postgres
     DB_PASSWORD: Qq123456
-    DB_HOST: 192.168.187.159
+    DB_HOST: 192.168.187.160
     DB_PORT: 5432
     DB_DATABASE: users
     DB_REPL_USER: repl_user
     DB_REPL_PASSWORD: Qq123456
-    DB_REPL_HOST: 192.168.187.160
+    DB_REPL_HOST: 192.168.187.161
     DB_REPL_PORT: 5432
-    BOT_HOST: 192.168.187.161
+    BOT_HOST: 192.168.187.162

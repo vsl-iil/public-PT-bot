@@ -22,11 +22,11 @@
     - name: Установить необходимые пакеты
       apt:
         name:
-          - postgresql-15
+          - postgresql-14
           - postgresql-contrib
           - postgresql-common
           - python3
-          - python3.12
+          - python3.10
           - python3-dev
           - python3-pip
           - jq
@@ -44,21 +44,21 @@
 
     - name: Проверить наличие кластера PostgreSQL
       shell: |
-        if pg_lsclusters | grep -q '15 main'; then
+        if pg_lsclusters | grep -q '14 main'; then
           echo 'Кластер существует'
         else
-          pg_createcluster 15 main
+          pg_createcluster 14 main
         fi
       register: create_cluster
       ignore_errors: true
 
     - name: Проверить, запущен ли PostgreSQL
-      command: pg_ctlcluster 15 main status
+      command: pg_ctlcluster 14 main status
       register: postgres_status
       ignore_errors: true
 
     - name: Запустить кластер PostgreSQL
-      command: pg_ctlcluster 15 main start
+      command: pg_ctlcluster 14 main start
       when: postgres_status.stdout.find('is not running') != -1
 
 - name: Настройка основной БД
@@ -72,7 +72,7 @@
     - name: Настройка pg_hba.conf
       blockinfile:
         create: true
-        path: /etc/postgresql/15/main/pg_hba.conf
+        path: /etc/postgresql/14/main/pg_hba.conf
         block: |
           local all {{ hostvars[inventory_hostname]['DB_USER'] }} peer
           host all all {{ hostvars[inventory_hostname]['DB_HOST'] }}/32 trust
@@ -82,7 +82,7 @@
     - name: Настройка postgresql.conf
       blockinfile:
         create: true
-        path: /etc/postgresql/15/main/postgresql.conf
+        path: /etc/postgresql/14/main/postgresql.conf
         block: | 
           listen_addresses = '*'
           port = 5432
@@ -142,7 +142,7 @@
   tasks:
     - name: Проверить статус PostgreSQL
       ansible.builtin.command:
-        cmd: "pg_ctlcluster 15 main status"
+        cmd: "pg_ctlcluster 14 main status"
       register: postgres_status
       ignore_errors: true
       become: yes
@@ -150,8 +150,8 @@
 
     - name: Запустить PostgreSQL
       ansible.builtin.command:
-        cmd: "pg_createcluster 15 main"
-      when: postgres_status.stdout.find('specified cluster \'15 main\' does not exist') != -1
+        cmd: "pg_createcluster 14 main"
+      when: postgres_status.stdout.find('specified cluster \'14 main\' does not exist') != -1
       become: yes
       become_user: root
 
@@ -173,7 +173,7 @@
         state: stopped
 
     - name:  Стереть директорию с бэкапом
-      command: rm -rf /var/lib/postgresql/15/main/*
+      command: rm -rf /var/lib/postgresql/14/main/*
       become_user: root
 
     - name: Проверить, что директория пуста
