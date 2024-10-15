@@ -1,0 +1,266 @@
+- name: Задачи для всех хостов
+  hosts: all
+  become: yes
+  tasks:
+    - name: Обновить репозитории APT
+      apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 86400
+
+    - name: Добавить ключ репозитория PostgreSQL в APT 
+      apt_key:
+        url: "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+        state: present
+
+    - name: Добавить PostgreSQL репозиторий
+      apt_repository:
+        repo: "deb http://apt.postgresql.org/pub/repos/apt/ jammy-pgdg main"
+        filename: "pgdg"
+        state: present
+
+    - name: Установить необходимые пакеты
+      apt:
+        name:
+          - postgresql-15
+          - postgresql-contrib
+          - postgresql-common
+          - python3
+          - python3.12
+          - python3-dev
+          - python3-pip
+          - jq
+        state: present
+
+    - name: Проверить версию psql
+      command: psql --version
+      register: psql_version
+      ignore_errors: true
+
+    - name: Проверить наличие PostgreSQL
+      fail:
+        msg: "PostgreSQL не установлен"
+      when: psql_version.failed
+
+    - name: Проверить наличие кластера PostgreSQL
+      shell: |
+        if pg_lsclusters | grep -q '15 main'; then
+          echo 'Кластер существует'
+        else
+          pg_createcluster 15 main
+        fi
+      register: create_cluster
+      ignore_errors: true
+
+    - name: Проверить, запущен ли PostgreSQL
+      command: pg_ctlcluster 15 main status
+      register: postgres_status
+      ignore_errors: true
+
+    - name: Запустить кластер PostgreSQL
+      command: pg_ctlcluster 15 main start
+      when: postgres_status.stdout.find('is not running') != -1
+
+- name: Настройка основной БД
+  hosts: ansible1
+  become: yes
+  tasks:
+    - name: Установка psycopg2
+      pip:
+        name: psycopg2-binary
+
+    - name: Настройка pg_hba.conf
+      blockinfile:
+        create: true
+        path: /etc/postgresql/15/main/pg_hba.conf
+        block: |
+          local all {{ hostvars[inventory_hostname]['DB_USER'] }} peer
+          host all all {{ hostvars[inventory_hostname]['DB_HOST'] }}/32 trust
+          host all all {{ hostvars[inventory_hostname]['BOT_HOST'] }}/32 trust
+          host replication {{ hostvars[inventory_hostname]['DB_REPL_USER'] }} {{ hostvars[inventory_hostname]['DB_REPL_HOST'] }}/24 trust
+
+    - name: Настройка postgresql.conf
+      blockinfile:
+        create: true
+        path: /etc/postgresql/15/main/postgresql.conf
+        block: | 
+          listen_addresses = '*'
+          port = 5432
+          log_destination = 'stderr'
+          logging_collector = on
+          log_directory = '/var/log/postgresql/'
+          log_filename = 'postgresql.log'
+          log_file_mode = 0644
+          archive_mode = on
+          archive_command = 'cp %p /oracle/pg_data/archive/%f'
+          max_wal_senders = 10
+          wal_level = replica
+          wal_log_hints = on
+          log_replication_commands = on
+
+    - name: Создать правило файрволла для PostgreSQL 
+      ufw:
+        rule: allow
+        port: '5432'
+        proto: 'tcp'
+
+    - name: Перезапустить PostgreSQL
+      service:
+        name: postgresql
+        state: restarted
+
+    - name: Создать основную БД
+      community.general.postgresql_db:
+        name: "{{ hostvars[inventory_hostname]['DB_DATABASE'] }}"
+        encoding: UTF-8
+        template: template0
+      become: yes
+      become_user: postgres
+
+    - name: Создать таблицу e-mail 
+      command: psql -d {{ hostvars[inventory_hostname]['DB_DATABASE'] }} -c "CREATE TABLE Почта (id serial PRIMARY KEY, email varchar(255));"
+      become_user: postgres
+      ignore_errors: true
+
+    - name: Создать таблицу телефонов
+      command: psql -d {{ hostvars[inventory_hostname]['DB_DATABASE'] }} -c "CREATE TABLE Телефоны (id serial PRIMARY KEY, phone varchar(16));"
+      become_user: postgres
+      ignore_errors: true
+
+    - name: Сменить пароль пользователя postgres
+      command: psql -c "ALTER USER {{ hostvars[inventory_hostname]['DB_USER'] }} WITH PASSWORD '{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}';"
+      become_user: postgres
+
+    - name: Создать пользователя для репликации
+      command: psql -c "CREATE USER {{ hostvars[inventory_hostname]['DB_REPL_USER'] }} REPLICATION LOGIN SUPERUSER PASSWORD '{{ hostvars[inventory_hostname]['DB_REPL_PASSWORD'] }}';"
+      become_user: postgres
+      ignore_errors: true
+
+- name: Настройка БД для репликации
+  hosts: ansible2
+  become: yes
+  tasks:
+    - name: Проверить статус PostgreSQL
+      ansible.builtin.command:
+        cmd: "pg_ctlcluster 15 main status"
+      register: postgres_status
+      ignore_errors: true
+      become: yes
+      become_user: root
+
+    - name: Запустить PostgreSQL
+      ansible.builtin.command:
+        cmd: "pg_createcluster 15 main"
+      when: postgres_status.stdout.find('specified cluster \'15 main\' does not exist') != -1
+      become: yes
+      become_user: root
+
+    - name: Путь к postgresql.conf 
+      shell: "pg_lsclusters --json | jq -r '.[].configdir'"
+      register: pg_conf_path
+
+    - name: Настроить postgresql.conf
+      blockinfile:
+        create: true
+        path: "{{ pg_conf_path.stdout }}/postgresql.conf"
+        block: |
+          listen_addresses = 'localhost, {{ hostvars[inventory_hostname]['DB_REPL_HOST'] }}'
+          port = {{ hostvars[inventory_hostname]['DB_REPL_PORT'] }}
+
+    - name: Остановить PostgreSQL
+      service:
+        name: postgresql
+        state: stopped
+
+    - name:  Стереть директорию с бэкапом
+      command: rm -rf /var/lib/postgresql/15/main/*
+      become_user: root
+
+    - name: Проверить, что директория пуста
+      command: find /var/lib/postgresql/14/main/ -mindepth 1 -delete
+      become: true
+
+    - name: Выполнить pg_basebackup
+      command: pg_basebackup -R -h {{ hostvars[inventory_hostname]['DB_HOST'] }} -U {{ hostvars[inventory_hostname]['DB_REPL_USER'] }} -D /var/lib/postgresql/14/main -P 
+      become_user: postgres
+      environment:
+        PGPASSWORD: "{{ hostvars[inventory_hostname]['DB_REPL_PASSWORD'] }}"
+
+    - name: Задать права на директорию
+      file:
+        path: /var/lib/postgresql/14/main/
+        owner: postgres
+        group: postgres
+        recurse: yes
+      become: true
+
+    - name: права
+      command: chown -R postgres:postgres /var/lib/postgresql/
+      become: true
+
+    - name: Запустить PostgreSQL
+      service:
+        name: postgresql
+        state: started
+
+      environment:
+        DB_HOST: "{{ hostvars[inventory_hostname]['DB_HOST'] }}"
+        DB_PORT: "{{ hostvars[inventory_hostname]['DB_PORT'] }}"
+        DB_REPL_HOST: "{{ hostvars[inventory_hostname]['DB_REPL_HOST'] }}"
+        DB_REPL_PORT: "{{ hostvars[inventory_hostname]['DB_REPL_PORT'] }}"
+        DB_REPL_USER: "{{ hostvars[inventory_hostname]['DB_REPL_USER'] }}"
+        DB_REPL_PASSWORD: "{{ hostvars[inventory_hostname]['DB_REPL_PASSWORD'] }}"
+
+- name: Настроить бота
+  hosts: ansible3
+  become: yes
+  tasks:
+    - name: Установить пакеты Python
+      pip:
+        name:
+          -  anyio==4.6.0
+          -  bcrypt==4.2.0
+          -  certifi==2024.8.30
+          -  cffi==1.17.1
+          -  charset-normalizer==3.4.0
+          -  cryptography==43.0.1
+          -  h11==0.14.0
+          -  httpcore==1.0.6
+          -  httpx==0.27.2
+          -  idna==3.10
+          -  paramiko==3.5.0
+          -  psycopg2==2.9.9
+          -  pycparser==2.22
+          -  PyNaCl==1.5.0
+          -  python-dotenv==1.0.1
+          -  python-telegram-bot==21.6
+          -  requests==2.32.3
+          -  sniffio==1.3.1
+          -  urllib3==2.2.3
+    - name: Создать рабочую директорию
+      file:
+        path: etc/bot
+        owner: ansible3
+        group: ansible3
+        state: directory
+        mode: '0777'
+
+    - name: Клонировать репозиторий
+      git:
+        repo: https://github.com/vsl-iil/pt-tgbot
+        dest: etc/bot
+        version: main
+
+    - name: Запуск бота
+      command: python3 etc/bot/bot.py
+      environment:
+        TOKEN: "{{ hostvars[inventory_hostname]['TOKEN'] }}"
+        DB_HOST: "{{ hostvars[inventory_hostname]['DB_HOST'] }}"
+        DB_PORT: "{{ hostvars[inventory_hostname]['DB_PORT'] }}"
+        DB_USER: "{{ hostvars[inventory_hostname]['DB_USER'] }}"
+        DB_PASSWORD: "{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}"
+        DB_DATABASE: "{{ hostvars[inventory_hostname]['DB_DATABASE'] }}"
+        RM_HOST: "{{ hostvars[inventory_hostname]['RM_HOST'] }}"
+        RM_PORT: "{{ hostvars[inventory_hostname]['RM_PORT'] }}"
+        RM_USER: "{{ hostvars[inventory_hostname]['RM_USER'] }}"
+        RM_PASSWORD: "{{ hostvars[inventory_hostname]['RM_PASSWORD'] }}"
